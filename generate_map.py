@@ -8,9 +8,7 @@ import folium
 import warnings
 warnings.filterwarnings("ignore")
 
-print("Loading data...")
-
-# ----- 1. DISASTER EXPOSURE 2006-2025 (LAUS monthly data) -----
+# Disaster Exposure - LAUS
 df_laus = pd.read_csv("FEMA_Disaster_2006_2025/laus_with_fema_disaster_exposure_2006_2025.csv")
 df_laus["state"] = df_laus["state"].str.strip().str.title()
 laus_state = df_laus.groupby("state").agg(
@@ -18,7 +16,7 @@ laus_state = df_laus.groupby("state").agg(
     avg_exposure_12m=("disaster_exposure_12m", "mean")
 ).reset_index()
 
-# ----- 2. DETAILED FEMA AID + RECOVERY TIME (2015-2025) -----
+#FEMA Aid
 df_d = pd.read_csv("disaster_data_export.csv")
 df_d["year"] = pd.to_numeric(df_d["year"], errors="coerce")
 df_d["state"] = df_d["state"].str.strip().str.title()
@@ -42,6 +40,11 @@ df_d["total_fema_aid"] = (df_d["ihp_total"] + df_d["pa_total"] +
                            df_d["cdbg_dr_allocation"] + df_d["sba_total_approved_loan_amount"])
 df_d["recovery_days"] = pd.to_numeric(df_d["frn1_days_since_disaster"], errors="coerce")
 
+# Compute declaration response time (fallback for states without CDBG-DR data)
+for col in ["incident_start", "declaration_date"]:
+    df_d[col] = pd.to_datetime(df_d[col], errors="coerce")
+df_d["declaration_response_days"] = (df_d["declaration_date"] - df_d["incident_start"]).dt.days
+
 def get_admin(y):
     if y <= 2008: return "Bush (R) 2001-08"
     elif y <= 2016: return "Obama (D) 2009-16"
@@ -55,11 +58,12 @@ state_aid = df_d.groupby("state").agg(
     ihp_total=("ihp_total","sum"),
     pa_total=("pa_total","sum"),
     avg_recovery_days=("recovery_days","mean"),
+    avg_declaration_response=("declaration_response_days","mean"),
     incident_types=("incident_type", lambda x: ", ".join(sorted(x.dropna().unique())))
 ).reset_index()
 state_aid["aid_per_disaster"] = state_aid["total_fema_aid"] / state_aid["disaster_count"]
 
-# ----- 3. ELECTION DATA 2008-2020 -----
+# Electiojn Information
 df_e = pd.read_csv("1976-2020-president.csv")
 df_e["candidatevotes"] = pd.to_numeric(df_e["candidatevotes"], errors="coerce")
 df_e = df_e.dropna(subset=["candidatevotes"])
@@ -91,7 +95,7 @@ def get_lean(row):
     return "Swing"
 epiv["political_lean"] = epiv.apply(get_lean, axis=1)
 
-# ----- 4. MERGE ALL DATA -----
+#Merging datasets with outerjoin on state, then filtering by states with valid abbreviations
 state_codes = {
     "Alabama":"AL","Alaska":"AK","Arizona":"AZ","Arkansas":"AR","California":"CA",
     "Colorado":"CO","Connecticut":"CT","Delaware":"DE","Florida":"FL","Georgia":"GA",
@@ -106,6 +110,7 @@ state_codes = {
     "District Of Columbia":"DC"
 }
 
+#Merging datasets with outerjoin on state, then filter by abbreviations
 full = laus_state.merge(state_aid, on="state", how="outer").merge(epiv, on="state", how="left")
 full["state_abbr"] = full["state"].map(state_codes)
 full = full[full["state_abbr"].notna()].copy()
@@ -115,9 +120,18 @@ for c in ["political_lean","w2008","w2012","w2016","w2020"]:
 full["total_fema_aid"] = full["total_fema_aid"].fillna(0)
 full["disaster_count"] = full["disaster_count"].fillna(0)
 
-print(f"  {len(full)} states merged. Building map...")
+# Hybrid recovery: use CDBG-DR days where available, fall back to declaration response time
+full["hybrid_recovery_days"] = full["avg_recovery_days"].combine_first(full["avg_declaration_response"])
+full["recovery_source"] = np.where(
+    full["avg_recovery_days"].notna(), "CDBG-DR Grant Timeline",
+    np.where(full["avg_declaration_response"].notna(), "Declaration Response Time", "No Data"))
 
-# ----- 5. BUILD FOLIUM MAP -----
+print(f"  {len(full)} states merged. Building map...")
+print(f"  Recovery coverage: {full['avg_recovery_days'].notna().sum()} CDBG-DR + "
+      f"{(full['avg_declaration_response'].notna() & full['avg_recovery_days'].isna()).sum()} declaration fallback = "
+      f"{full['hybrid_recovery_days'].notna().sum()} total")
+
+# Starting to build Map
 state_geo = requests.get(
     "https://raw.githubusercontent.com/python-visualization/folium-example-data/main/us_states.json"
 ).json()
@@ -145,16 +159,16 @@ folium.Choropleth(
     legend_name="Avg 12-Month Disaster Exposure 2006-2025", highlight=True, show=False
 ).add_to(m)
 
-# Layer 3: Recovery Time
-_rec_df = full[["state_abbr","avg_recovery_days"]].dropna()
+# Layer 3: Hybrid Recovery Time (CDBG-DR where available, declaration response as fallback)
+_rec_df = full[["state_abbr","hybrid_recovery_days"]].dropna()
 if len(_rec_df) > 1:
     folium.Choropleth(
         geo_data=state_geo,
-        name="Avg Recovery Time — Days to First CDBG-DR Grant",
+        name="Avg Response/Recovery Time (Hybrid)",
         data=_rec_df,
-        columns=["state_abbr","avg_recovery_days"], key_on="feature.id",
+        columns=["state_abbr","hybrid_recovery_days"], key_on="feature.id",
         fill_color="RdYlGn_r", fill_opacity=0.75, line_opacity=0.3,
-        legend_name="Avg Days: Disaster Declaration to First CDBG-DR Grant",
+        legend_name="Avg Response Time (days) — CDBG-DR or Declaration Response fallback",
         highlight=True, show=False
     ).add_to(m)
 
@@ -207,15 +221,22 @@ for _, row in full.iterrows():
     aid  = row.get("total_fema_aid", 0) or 0
     nd   = int(row.get("disaster_count", 0) or 0)
     exp  = row.get("avg_exposure_12m", np.nan)
-    rec  = row.get("avg_recovery_days", np.nan)
+    rec_cdbg = row.get("avg_recovery_days", np.nan)
+    rec_decl = row.get("avg_declaration_response", np.nan)
+    rec_src  = row.get("recovery_source", "No Data")
     lean = row.get("political_lean", "N/A")
     w08, w12, w16, w20 = [row.get(f"w{y}", "N/A") for y in [2008, 2012, 2016, 2020]]
     apd  = row.get("aid_per_disaster", np.nan)
 
-    # Omit recovery row entirely when no CDBG-DR data exists for the state
-    rec_row = (f'    <tr><td colspan="2">Avg Recovery (days to CDBG-DR):</td>'
-               f'<td colspan="2">{rec:.0f} days</td></tr>')\
-              if pd.notna(rec) else ""
+    # Build recovery row with hybrid metric and source label
+    if pd.notna(rec_cdbg):
+        rec_row = (f'    <tr><td colspan="2">Avg Recovery (CDBG-DR):</td>'
+                   f'<td colspan="2">{rec_cdbg:.0f} days</td></tr>')
+    elif pd.notna(rec_decl):
+        rec_row = (f'    <tr><td colspan="2">Avg Response (Declaration):</td>'
+                   f'<td colspan="2">{rec_decl:.0f} days</td></tr>')
+    else:
+        rec_row = ""
     a_s = f"${apd/1e6:.1f}M" if pd.notna(apd) and apd > 0 else "N/A"
     e_s = f"{exp:.1f}" if pd.notna(exp) else "N/A"
 
@@ -335,7 +356,7 @@ m.get_root().html.add_child(folium.Element(f"""
     </tr>
     {rows_html}
   </table>
-  <small style="color:#888">Recovery = days to first CDBG-DR grant</small>
+  <small style="color:#888">Recovery = days to first CDBG-DR grant; Declaration = days from incident to FEMA declaration</small>
 </div>"""))
 
 out_path = "fema_map.html"
