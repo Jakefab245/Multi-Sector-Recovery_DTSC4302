@@ -1,0 +1,37 @@
+name: Python and Jupyter CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.10
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install nbconvert
+
+      - name: Run Python script(s)
+        run: |
+          if [ -f generate_map.py ]; then python generate_map.py; fi
+
+      - name: Check Jupyter notebooks
+        run: |
+          for notebook in *.ipynb; do
+            if [ -f "$notebook" ]; then
+              jupyter nbconvert --to notebook --execute "$notebook" --output /dev/null
+            fi
+          done
