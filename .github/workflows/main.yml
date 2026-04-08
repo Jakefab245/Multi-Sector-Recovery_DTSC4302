@@ -30,8 +30,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pandas numpy matplotlib folium jupyter nbconvert
 
+      - name: List installed packages
+        run: python -m pip list
+
       - name: Run Python script(s)
         run: |
+          which python
+          python --version
+          python -m pip list
           if [ -f generate_map.py ]; then python generate_map.py; fi
 
       - name: Check Jupyter notebooks
