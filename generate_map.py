@@ -63,27 +63,31 @@ state_aid = df_d.groupby("state").agg(
 ).reset_index()
 state_aid["aid_per_disaster"] = state_aid["total_fema_aid"] / state_aid["disaster_count"]
 
-# Electiojn Information
+# Election Information
 df_e = pd.read_csv("1976-2020-president.csv")
 df_e["candidatevotes"] = pd.to_numeric(df_e["candidatevotes"], errors="coerce")
 df_e = df_e.dropna(subset=["candidatevotes"])
 df_e["state"] = df_e["state"].str.strip().str.title()
 df_e = df_e[df_e["year"].isin([2008, 2012, 2016, 2020])].copy()
 
+#Party Simplification
 def simp(p):
     p = str(p).upper()
     if "DEMOCRAT" in p: return "DEM"
     if "REPUBLICAN" in p: return "REP"
     return "OTH"
 
+#Election Winners
 winners = df_e.groupby(["year","state"]).apply(
     lambda x: simp(x.loc[x["candidatevotes"].idxmax(), "party_detailed"])
 ).reset_index()
 winners.columns = ["year","state","winner"]
 
+# Pivoting of Election winners
 epiv = winners.pivot(index="state", columns="year", values="winner").reset_index()
 epiv.columns = ["state"] + [f"w{int(c)}" for c in epiv.columns[1:]]
 
+# Political Leaning Classification
 def get_lean(row):
     vals = [row.get(c, None) for c in ["w2008","w2012","w2016","w2020"]]
     d = sum(1 for v in vals if v == "DEM")
@@ -207,7 +211,7 @@ state_centroids = {
     "VT":[44.07,-72.67],"VA":[37.52,-78.85],"WA":[47.38,-120.45],"WV":[38.64,-80.62],
     "WI":[44.62,-89.99],"WY":[42.99,-107.55],"DC":[38.91,-77.02]
 }
-
+#Creation of State Info Markers
 mkr = folium.FeatureGroup(name="State Info Markers", show=True)
 
 def pc(p):
@@ -240,6 +244,7 @@ for _, row in full.iterrows():
     a_s = f"${apd/1e6:.1f}M" if pd.notna(apd) and apd > 0 else "N/A"
     e_s = f"{exp:.1f}" if pd.notna(exp) else "N/A"
 
+    # Constructing HTML for popup with style for readability
     popup_html = f"""
 <div style="font-family:Arial,sans-serif;width:295px;font-size:13px;">
   <h4 style="margin:0 0 5px;padding-bottom:4px;border-bottom:2px solid #444;">
